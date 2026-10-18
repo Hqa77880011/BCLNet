@@ -1,82 +1,61 @@
-# Boundary-Calibrated Lightweight Network for Domain-Generalized Polyp Segmentation
+# BCLNet
 
 Implementation of **Boundary-Calibrated Lightweight Network for Domain-Generalized Polyp Segmentation**.
 
-A compact encoder predicts segmentation, a seven-pixel morphological boundary band, and a boundary-conditioned temperature between 1 and 2.5. Two photometric views share supervised region/boundary loss and detached entropy-weighted consistency. Boundary-weighted Brier loss calibrates the same probabilities used at inference.
+## Installation
 
-## Install
-
-Use Python 3.10 or later. Create and activate a virtual environment, then install:
+Use Python 3.10+. Create and activate a virtual environment before installing:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 python -m pip install -e .
 ```
 
-## Prepare data
+In PowerShell, replace the activation line with `.venv\Scripts\Activate.ps1`.
+
+## Data and preprocessing
 
 `x[N,3,H,W]` and binary `y[N,1,H,W]` contain paired RGB images and polyp masks. Use source-only Kvasir/CVC-ClinicDB training groups and explicit held-out dataset split codes for CVC-ColonDB, ETIS, or another declared target. No target images enter source training.
 
-Arrays use numeric NPZ format, loaded without pickle. `group[N]` identifies independent subjects, devices, scenes, lots, or source images. Related samples must share a group. Optional `split[N]` codes 0/1/2/3 explicitly assign training/validation/calibration/test (three-role input using 0/1/2 remains supported); otherwise ordered groups are allocated 60/15/10/15 to training/validation/calibration/test. Test data never select model parameters or checkpoints.
+Arrays use numeric NPZ format, loaded without pickle. `group[N]` identifies independent source units; related samples must share a group. Optional `split[N]` codes 0/1/2/3 explicitly assign training/validation/calibration/test (three-role input using 0/1/2 remains supported); otherwise ordered groups are allocated 60/15/10/15 to training/validation/calibration/test. Test data never select model parameters or checkpoints.
 
-```bash
-bclnet demo --output data/example.npz --count 96 --config config.json
-bclnet prepare --input data/example.npz --output data/prepared
-```
-
-The demo defines a small synthetic problem with the documented tensor interface. Use application data in that schema for the paper's evaluation settings.
+`demo` generates synthetic inputs for this tensor interface; application-specific results require acquired data.
 
 Paired image folders with matching filenames can be packed with:
 
-```bash
-bclnet pack --images data/images --targets data/targets --mask --output data/images.npz --size 64
-```
-
 Omit `--mask` for RGB reconstruction targets. Add additional required arrays according to the schema above before splitting.
 
-## Train and execute
+```bash
+bclnet demo --output data/example.npz --count 96 --config config.json --seed 13
+bclnet prepare --input data/example.npz --output data/prepared
+```
+
+## Training and inference
 
 ```bash
-bclnet train --input data/prepared --output runs/full --config config.json --variant full --epochs 100 --batch-size 16
+bclnet train --input data/prepared --output runs/full --config config.json --variant full --epochs 100 --batch-size 16 --seed 13
+```
+
+## Evaluation
+
+```bash
 bclnet evaluate --input data/prepared/test.npz --model runs/full/model.pt --output runs/full/evaluation
 bclnet plot --input runs --output runs/figures
 ```
 
-Training uses AdamW and selects the minimum validation objective. `model.pt` stores parameters and configuration; `history.json` records training/validation objectives. Evaluation exports predictions and mechanism tensors to `predictions.npz` and computed scores to `metrics.json`. Plotting exports comparison charts from those actual evaluation files.
+## Ablations
 
-`--device cpu` is the default; `--device cuda` selects CUDA. `--lr`, `--epochs`, `--batch-size`, and `--seed` control optimization. Method parameters are in `config.json`; `--set key=value` overrides one value using JSON syntax. Use identical splits and seeds across comparisons.
-
-## Calibration
-
-For interval or classification confidence calibration, use independent groups excluded from fitting and checkpoint selection:
+Supported controls: `baseline`, `no_temperature`, `no_calibration`, `no_consistency`. Keep the input groups, seed and budget fixed.
 
 ```bash
-bclnet calibrate --input data/prepared/calibration.npz --model runs/full/model.pt --output runs/full/calibrated.pt
+bclnet train --input data/prepared --config config.json --output runs/no_temperature --variant no_temperature --epochs 100 --batch-size 16 --seed 13
 ```
 
-Evaluate `calibrated.pt` with the same evaluation command. Classification uses temperature scaling; numeric intervals use a 90% group-maximum split-calibration expansion. Insufficient independent units retain infinite intervals. Pretraining checkpoints can initialize supervised training with `train --init path/to/model.pt`.
+## Outputs
 
-## Baselines and ablations
+`data/prepared/` contains train/validation/calibration/test NPZs. Training writes `model.pt`, `history.json` and `training.json` with run arguments. Evaluation writes `predictions.npz` and `metrics.json`; plotting reads saved metric files.
 
-Available variants: `full`, `baseline`, `no_temperature`, `no_consistency`, `no_calibration`. `baseline` removes the paper-specific mechanism while retaining the input and prediction task. Other variants disable their named component.
+Keep `config.json` with the run; it contains model/data settings and the seed where the CLI does not expose one. Use separate output directories for different seeds/conditions.
 
-```bash
-bclnet train --input data/prepared --output runs/baseline --config config.json --variant baseline
-bclnet evaluate --input data/prepared/test.npz --model runs/baseline/model.pt --output runs/baseline/evaluation
-```
-
-## Metrics and implementation conventions
-
-Classification reports accuracy, balanced accuracy, macro-F1, NLL, confidence ECE, and worst-group F1; binary tasks add AUROC and AUPRC. Unknown labels use -1 and enable unknown AUROC and OSCR. Segmentation reports Dice, IoU, precision, recall, MAE, Brier/ECE, two-pixel boundary F1, symmetric contour distance, and HD95. Reconstruction reports RMSE, MAE, signed bias, unit-range PSNR, and Gaussian-window SSIM. Each method adds its mechanism metrics where applicable.
-
-Parameter counts and forward timing describe the executing process. Use batch size one and a declared device configuration for device latency comparisons. Physical energy and scores from external task evaluators require measured inputs; they are not inferred from parameter counts. All prediction arrays remain available for task-specific evaluation.
-
-The implementation uses the explicit core operations described above with configurable compact networks. Numeric conventions and application-specific information are stated with the method and data schema. The parameter file contains the current defaults.
-
-## Perceptual and saliency endpoints
-
-```bash
-python -m pip install -e ".[image-metrics]"
-python -m bclnet.evaluate_images --predictions runs/full/evaluation/predictions.npz --reference data/prepared/test.npz --metric saliency --output runs/additional_metrics.json
-```
-
-LPIPS uses the [published perceptual metric implementation](https://github.com/richzhang/PerceptualSimilarity) with RGB values mapped to [-1,1]. Saliency endpoints use [PySODMetrics](https://github.com/lartpang/PySODMetrics) for adaptive/maximum F-measure, E-measure, S-measure, and weighted F-measure; their threshold conventions remain those of the metric package.
+Source inspection: Python 3.13.5, numpy 2.1.3, scipy 1.15.3, torch 2.7.1+cu118, scikit-learn 1.6.1, matplotlib 3.10.0 (installed versions inspected). Checks covered Python syntax, configuration parsing and CLI arguments. No training, full evaluation or CI was run in this update.
